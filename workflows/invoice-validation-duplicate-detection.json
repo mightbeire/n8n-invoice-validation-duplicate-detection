@@ -1,0 +1,541 @@
+{
+  "name": "AI-Assisted Invoice Validation and Duplicate Detection - Public",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "40ad02ad-c50c-4fdc-b19d-8c7b82281b8a",
+      "name": "Gmail Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "=attachment_0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        208,
+        0
+      ],
+      "id": "30b16cd0-faac-4558-b97d-7cf074f210c6",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are an invoice extraction assistant. Analyze the extracted text and return structured invoice data only when the document is a valid invoice.\n\nRequired fields:\n- vendor_name\n- vendor_email\n- invoice_number\n- issue_date\n- due_date\n- customer_name\n- line_items\n- subtotal\n- tax\n- total_amount\n\nIf the document is not an invoice, or if a required field is missing, use the Finance Review Slack tool to report the issue. Do not invent missing values.\n\nClassify the expense into a short business category such as Marketing, Software, Legal, Operations, or Other.\n\nCheck two basic anomaly rules:\n1. subtotal + tax must equal total_amount;\n2. due_date must not be earlier than issue_date.\n\nIf either rule fails, use the Finance Review Slack tool and report the invoice number, vendor, and failed rule.\n\nFor a complete invoice that passes these checks, return only valid JSON with this shape:\n{\n  \"vendor_name\": \"string\",\n  \"vendor_email\": \"string\",\n  \"invoice_number\": \"string\",\n  \"issue_date\": \"YYYY-MM-DD\",\n  \"due_date\": \"YYYY-MM-DD\",\n  \"customer_name\": \"string\",\n  \"line_items\": [{\"description\": \"string\", \"amount\": 0}],\n  \"subtotal\": 0,\n  \"tax\": 0,\n  \"total_amount\": 0,\n  \"classification\": \"string\"\n}\n\nDo not wrap the JSON in Markdown."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        416,
+        0
+      ],
+      "id": "71df01b5-b730-476a-996d-02939fb23267",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Gmail Trigger').item.json.id }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        432,
+        208
+      ],
+      "id": "1e8f1a8c-2103-4fc6-ade1-79ad3b240e5a",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "finance-review"
+        },
+        "text": "={{ $fromAI('Message_Text', '', 'string') }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slackTool",
+      "typeVersion": 2.5,
+      "position": [
+        576,
+        208
+      ],
+      "id": "fa484a72-be9f-4616-abf7-b8f4825c52ea",
+      "name": "Send a message in Slack",
+      "webhookId": "d7707ee2-8eea-4dca-a78a-762ab52b58ec"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-safeguard-20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        288,
+        208
+      ],
+      "id": "58f795e0-1266-4bea-89de-ab1baa0a509a",
+      "name": "Groq Chat Model"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "list",
+          "cachedResultName": "invoice-register",
+          "cachedResultUrl": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": ""
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Invoice Number",
+              "lookupValue": "={{ $json.invoice_number }}"
+            }
+          ]
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "A:A"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        960,
+        64
+      ],
+      "id": "daac1dc3-2690-440a-8e45-f9714156660a",
+      "name": "Get row(s) in sheet",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Loop through all incoming items from the AI Agent\nfor (const item of $input.all()) {\n  try {\n    // Parse the stringified text inside the \"output\" key\n    const parsedData = JSON.parse(item.json.output);\n    \n    // Overwrite the item's json structure with the newly parsed clean data\n    item.json = parsedData;\n  } catch (error) {\n    // If parsing fails, keep the original item and log an error key\n    item.json.error = \"Failed to parse JSON string: \" + error.message;\n  }\n}\n\n// Return the properly formatted data to the next node\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        32
+      ],
+      "id": "22fc8ba0-30b4-4ed8-8faa-d1405be7dba6",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d26d7921-7e2b-48f4-a973-d464666b638d",
+              "leftValue": "={{ $json.row_number }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "notExists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1168,
+        64
+      ],
+      "id": "042e1e12-4d00-4459-acef-d368b8cf96e4",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "finance-review"
+        },
+        "text": "=Potential duplicate invoice detected. Invoice number: {{ $json[\"Invoice Number\"] }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.5,
+      "position": [
+        1376,
+        224
+      ],
+      "id": "b00bbd8f-a5ab-47a2-b40f-f3d47bebc174",
+      "name": "Send a message",
+      "webhookId": "cf2c9536-26bf-42f9-9142-ec4499b75a5d"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "list",
+          "cachedResultName": "invoice-register",
+          "cachedResultUrl": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": ""
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Invoice Number": "={{ $('Code in JavaScript').item.json.invoice_number }}",
+            "Vendor Name": "={{ $('Code in JavaScript').item.json.vendor_name }}",
+            "Vendor Email": "={{ $('Code in JavaScript').item.json.vendor_email }}",
+            "Issue Date": "={{ $('Code in JavaScript').item.json.issue_date }}",
+            "Due Date": "={{ $('Code in JavaScript').item.json.due_date }}",
+            "Customer Name": "={{ $('Code in JavaScript').item.json.customer_name }}",
+            "Subtotal": "={{ $('Code in JavaScript').item.json.subtotal }}",
+            "Tax": "={{ $('Code in JavaScript').item.json.tax }}",
+            "Total Amount": "={{ $('Code in JavaScript').item.json.total_amount }}",
+            "Classification": "={{ $('Code in JavaScript').item.json.classification }}",
+            "Date Processed": "={{ $now.format('yyyy-MM-dd') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Invoice Number",
+              "displayName": "Invoice Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Vendor Name",
+              "displayName": "Vendor Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Vendor Email",
+              "displayName": "Vendor Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Issue Date",
+              "displayName": "Issue Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Subtotal",
+              "displayName": "Subtotal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tax",
+              "displayName": "Tax",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total Amount",
+              "displayName": "Total Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Classification",
+              "displayName": "Classification",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Date Processed",
+              "displayName": "Date Processed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1376,
+        32
+      ],
+      "id": "e5e18311-32f3-4294-99cc-5aab3e56eae4",
+      "name": "Append row in sheet"
+    },
+    {
+      "parameters": {
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1584,
+        48
+      ],
+      "id": "908b6486-933d-4254-8844-50d36b57fe68",
+      "name": "Wait",
+      "webhookId": "c6904872-778f-4df0-b5ef-6b51376268db"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Code in JavaScript').item.json.vendor_email }}",
+        "subject": "=Invoice {{ $('Code in JavaScript').item.json.invoice_number }} processed",
+        "emailType": "text",
+        "message": "=Hello {{ $('Code in JavaScript').item.json.vendor_name }},\n\nInvoice {{ $('Code in JavaScript').item.json.invoice_number }} has been recorded for review on {{ $now.format('yyyy-MM-dd') }}.\n\nThank you.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1792,
+        32
+      ],
+      "id": "f6b8bf96-05ce-4f50-8341-3e4facca1f1b",
+      "name": "Send a message1",
+      "webhookId": "f2cb7cf8-51f7-476f-a462-829c6c0ec749"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message in Slack": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
